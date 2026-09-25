@@ -211,7 +211,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}-wb.${{ github.run_number }}
-          name: v${{ steps.version.outputs.version }} (CI build #${{ github.run_number }})
+          # name 必须加引号：值里若含 # 会被 YAML 当作行内注释截断，
+          # 导致 Release 标题被吃掉后半段（实测踩过：显示成 "v1.9.1 (CI build"）。
+          name: "v${{ steps.version.outputs.version }} CI 编译 #${{ github.run_number }}"
           body: |
             CI 编译产物（GitHub Actions 自动构建）
 
