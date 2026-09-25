@@ -26,7 +26,7 @@ function makeHarness(queueImpl) {
   const on = (n, l) => listeners[n].push(l)
   // 关键：emit 与 close 共用同一 queueImpl（模拟"同一 setImmediate 实现"）
   const emit = (n, ...a) => queueImpl(() => { for (const l of listeners[n]) l(...a) })
-  const close = () => new Promise(r => queueImpl(r))
+  const close = () => new Promise(resolve => queueImpl(resolve))
   const g = { lx: { isRestoringPlay: false } }
   let recorded = false
   let order = []
@@ -41,8 +41,8 @@ function makeHarness(queueImpl) {
   async function restoreEntry() {
     g.lx.isRestoringPlay = true
     try {
-      await playList()          // 同步栈内投递 task-C
-      await close()             // 关窗等待（与 emit 同队列）
+      await playList() // 同步栈内投递 task-C
+      await close() // 关窗等待（与 emit 同队列）
     } finally {
       g.lx.isRestoringPlay = false
       order.push('window-closed')
@@ -52,13 +52,13 @@ function makeHarness(queueImpl) {
   return {
     async run() {
       await restoreEntry()
-      await close()             // 放行剩余回调
+      await close() // 放行剩余回调
       return { recorded, order }
     },
   }
 }
 
-;(async () => {
+(async() => {
   const cases = []
   const push = (name, cond, detail) => { cases.push({ name, pass: cond, detail }) }
 
