@@ -1,0 +1,64 @@
+name: CI Build Check
+
+# 触发条件（自建，刻意不复用现有 build-test.yml 的触发）：
+#   - 现有 build-test.yml 的 pull_request 仅对 dev 分支生效，
+#     而本仓库实际开发分支是 workbuddy/master-4c015332，
+#     向它提 PR 不会触发 build-test.yml —— 这正是本工作流要补上的缺口。
+#   - 因此这里显式声明 push / pull_request 且【不加 branches 过滤】，对任意分支生效。
+#   - 额外加 workflow_dispatch，便于首次合入后手动验证。
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支/PR 上重复推送时，取消仍在进行的旧运行，避免排队与资源浪费。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-check:
+    runs-on: ubuntu-latest
+    # 该构建是纯 JS bundle 打包（无原生编译），通常数分钟内完成；
+    # 设 30 分钟上限防止异常挂起。
+    timeout-minutes: 30
+
+    steps:
+      # 1) 检出代码
+      - name: Check out git repository
+        uses: actions/checkout@v4
+
+      # 2) 配置运行时环境 + 安装依赖（复用项目自带的 composite action）
+      #
+      # 复用理由：仓库根的 .github/actions/setup/action.yml 已经内置了本任务所需的全部能力，
+      # 且与项目既有 workflow（release.yml / beta-pack.yml）保持同一套环境约定：
+      #   - actions/setup-node@v4 with node-version-file: .nvmrc  → Node 版本锚定 .nvmrc（内容 v18），
+      #     不硬编码版本，避免出现 build-test.yml 里硬编码 node 20 与 .nvmrc 不一致的历史遗留问题。
+      #   - actions/setup-java@v4 (microsoft / 17 / cache: gradle) → Java 17 + gradle 缓存。
+      #     本工作流的 build-test 是纯 JS bundle，不触发 gradle，但由该 action 统一提供 Java 环境，
+      #     与项目其它 workflow 保持一致，成本极低。
+      #   - actions/cache@v4，key = ${runner.os}-npm-cache-${hashFiles('package-lock.json')}
+      #     → 依赖缓存以 package-lock.json 内容哈希为 key（npm 项目，存在 package-lock.json、无 yarn.lock）。
+      #   - npm ci → 安装依赖（与项目包管理器 npm 一致）。
+      # 因此无需自建 setup-node / 缓存步骤，复用它即满足「版本锚定 + 依赖缓存」的全部要求。
+      - name: Setup env & install dependencies
+        uses: ./.github/actions/setup
+
+      # 3) 静态检查（与项目既有 CI 一致）
+      - name: Eslint check
+        run: npm run lint
+
+      # 4) 编译校验
+      #
+      # 选用 `npm run build-test` 的依据：
+      #   - 它是仓库【既有】且【已在 CI 中使用过】的构建命令
+      #     （见 .github/workflows/build-test.yml 的 "Test Build" 步骤），
+      #     不新增/自创命令，保证与项目既有方式一致。
+      #   - 其内容为 `react-native bundle --platform android --dev true ...`，
+      #     仅做 JS bundle 打包，【不需要 keystore】。
+      #   - 相对地，assembleRelease / assembleDebug 会走 android/app/build.gradle 的
+      #     signingConfigs 逻辑：当无 MYAPP_UPLOAD_STORE_FILE property 时会加载
+      #     rootProject.file("keystore.properties")，而该文件被 .gitignore 忽略、CI 上不存在，
+      #     会在配置阶段抛 FileNotFoundException。故本工作流【严禁】跑任何 assemble* 任务。
+      - name: Test Build (JS bundle, keystore-free)
+        run: npm run build-test

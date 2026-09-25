@@ -59,6 +59,12 @@ buck-out/
 
 # Bundle artifact
 *.jsbundle
+# react-native bundle 的输出（npm run build-test / npm run bundle-android）
+# 用前导 / 锚定到仓库根，避免误伤 android/app/src/main/res 等源码目录
+/index.android.bundle
+/res/
+# 注意：assets/ 下有被跟踪的 fonts/、script/ 源码，故只忽略该具体文件而非整个目录
+/android/app/src/main/assets/index.android.bundle
 
 # Ruby / CocoaPods
 /ios/Pods/
@@ -66,3 +72,6 @@ buck-out/
 
 # testing
 /coverage
+
+# WorkBuddy 本地工作区状态（非项目产物）
+.workbuddy/
