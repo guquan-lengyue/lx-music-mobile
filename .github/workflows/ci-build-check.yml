@@ -5,7 +5,7 @@ name: CI Build Check
 #     而本仓库实际开发分支是 workbuddy/master-4c015332，
 #     向它提 PR 不会触发 build-test.yml —— 这正是本工作流要补上的缺口。
 #   - 因此这里显式声明 push / pull_request 且【不加 branches 过滤】，对任意分支生效。
-#   - 额外加 workflow_dispatch，便于首次合入后手动验证。
+#   - 额外加 workflow_dispatch，便于手动验证。
 on:
   push:
   pull_request:
@@ -28,27 +28,48 @@ jobs:
       - name: Check out git repository
         uses: actions/checkout@v4
 
-      # 2) 配置运行时环境 + 安装依赖（复用项目自带的 composite action）
+      # 2) 配置 Node 运行时
       #
-      # 复用理由：仓库根的 .github/actions/setup/action.yml 已经内置了本任务所需的全部能力，
-      # 且与项目既有 workflow（release.yml / beta-pack.yml）保持同一套环境约定：
-      #   - actions/setup-node@v4 with node-version-file: .nvmrc  → Node 版本锚定 .nvmrc（内容 v18），
-      #     不硬编码版本，避免出现 build-test.yml 里硬编码 node 20 与 .nvmrc 不一致的历史遗留问题。
-      #   - actions/setup-java@v4 (microsoft / 17 / cache: gradle) → Java 17 + gradle 缓存。
-      #     本工作流的 build-test 是纯 JS bundle，不触发 gradle，但由该 action 统一提供 Java 环境，
-      #     与项目其它 workflow 保持一致，成本极低。
-      #   - actions/cache@v4，key = ${runner.os}-npm-cache-${hashFiles('package-lock.json')}
-      #     → 依赖缓存以 package-lock.json 内容哈希为 key（npm 项目，存在 package-lock.json、无 yarn.lock）。
-      #   - npm ci → 安装依赖（与项目包管理器 npm 一致）。
-      # 因此无需自建 setup-node / 缓存步骤，复用它即满足「版本锚定 + 依赖缓存」的全部要求。
-      - name: Setup env & install dependencies
-        uses: ./.github/actions/setup
+      # 版本锚定：node-version-file: .nvmrc（仓库根 .nvmrc 内容为 v18），
+      # 不硬编码版本号，避免出现既有 build-test.yml 里硬编码 node 20 与 .nvmrc 不一致的问题。
+      #
+      # 依赖缓存：cache: npm —— 这是 setup-node 官方内建缓存机制，
+      # 以 package-lock.json 内容哈希自动作为缓存 key（本项目为 npm 项目，存在 package-lock.json 无 yarn.lock）。
+      #
+      # 【为什么不复用仓库自带的 ./.github/actions/setup】
+      # 该 composite action 的缓存步骤实际是失效的，已实测确认：
+      #   它用 `path: ${{ steps.npm-cache-dir.outputs.cachedir }}` 指定缓存目录，
+      #   但在 composite action 中，除非显式声明 outputs 块，
+      #   否则后续步骤无法读取内部步骤的 outputs，该表达式求值为空字符串，
+      #   导致 actions/cache 报 "Path Validation Error: Path(s) specified in the action
+      #   for caching do(es) not exist, hence no cache is being saved."
+      #   实测证据：连续两轮运行该步骤耗时均为 108s，零提速，坐实缓存从未保存。
+      # 因此这里改为在本工作流内直接使用官方 cache: npm 机制，使缓存真正生效。
+      # 注：本改动仅作用于本工作流，未修改上游共享的 .github/actions/setup/action.yml。
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
 
-      # 3) 静态检查（与项目既有 CI 一致）
+      # 3) 配置 Java 运行时（原生编译需要 JDK 17）
+      # 与项目既有约定一致：distribution microsoft / java-version 17，并开启 gradle 缓存。
+      - name: Setup Java Env
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'microsoft'
+          java-version: '17'
+          cache: gradle
+
+      # 4) 安装依赖（与项目包管理器 npm 一致，ci 模式严格按 lockfile 安装）
+      - name: Install dependencies
+        run: npm ci
+
+      # 5) 静态检查（与项目既有 CI 一致）
       - name: Eslint check
         run: npm run lint
 
-      # 4) 编译校验
+      # 6) 编译校验
       #
       # 选用 `npm run build-test` 的依据：
       #   - 它是仓库【既有】且【已在 CI 中使用过】的构建命令
