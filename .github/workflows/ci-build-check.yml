@@ -86,9 +86,149 @@ jobs:
       #     不新增/自创命令，保证与项目既有方式一致。
       #   - 其内容为 `react-native bundle --platform android --dev true ...`，
       #     仅做 JS bundle 打包，【不需要 keystore】。
-      #   - 相对地，assembleRelease / assembleDebug 会走 android/app/build.gradle 的
-      #     signingConfigs 逻辑：当无 MYAPP_UPLOAD_STORE_FILE property 时会加载
-      #     rootProject.file("keystore.properties")，而该文件被 .gitignore 忽略、CI 上不存在，
-      #     会在配置阶段抛 FileNotFoundException。故本工作流【严禁】跑任何 assemble* 任务。
+      #   - 本步骤是「快速编译校验」，不产出可安装包；需要 release APK 见同文件
+      #     下方的 `release-apk` job（那里显式传入签名参数，规避 keystore.properties 缺失问题）。
       - name: Test Build (JS bundle, keystore-free)
         run: npm run build-test
+
+  # ------------------------------------------------------------------
+  # 编译 release APK 并发布到 GitHub Release
+  #
+  # 与上面的 build-check 分离为独立 job：build-check 是快速校验关卡，
+  # 本 job 耗时更长（Gradle 原生编译）且会创建 Release，职责不同。
+  # ------------------------------------------------------------------
+  release-apk:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # 创建 GitHub Release 需要写权限；默认 token 权限只读，必须显式声明。
+    permissions:
+      contents: write
+
+    steps:
+      # 1) 检出代码
+      - name: Check out git repository
+        uses: actions/checkout@v4
+
+      # 2) 配置 Node 运行时（锚定 .nvmrc，开启 npm 缓存）
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # 3) 配置 Java 运行时（Gradle 原生编译必需 JDK 17）
+      # 本 job 确实会调用 gradle，因此这里开启 cache: gradle 是有效的。
+      - name: Setup Java Env
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'microsoft'
+          java-version: '17'
+          cache: gradle
+
+      # 4) 安装依赖
+      - name: Install dependencies
+        run: npm ci
+
+      # 5) 读取版本号（后续用于 APK 文件名与 Release tag）
+      - name: Get package version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "PACKAGE_VERSION=$VERSION" >> $GITHUB_ENV
+
+      # 6) 编译 release APK
+      #
+      # 【签名说明 —— 必须显式传 4 个 -P 参数，否则编译必失败】
+      # android/app/build.gradle 的 signingConfigs.release 是二分支结构：
+      #   if (project.hasProperty('MYAPP_UPLOAD_STORE_FILE')) { 用该 property }
+      #   else { new FileInputStream(rootProject.file("keystore.properties")) }  ← 会抛异常
+      # keystore.properties 被 .gitignore 忽略、CI 上不存在，因此不传 property 时
+      # 会在 Gradle 【配置阶段】就抛 FileNotFoundException，编译根本进不去。
+      #
+      # 本仓库用一个可用的签名替代：仓库中【已跟踪】的 android/app/debug.keystore
+      # （React Native 模板自带的调试密钥，alias=androiddebugkey / 口令均为 android）。
+      # 传入 MYAPP_UPLOAD_STORE_FILE 后即走第一个分支，完全绕过 keystore.properties。
+      #
+      # 重要限制（务必知悉）：debug.keystore 是公开的调试密钥，
+      # 产物可正常安装、可分发测试，但【不可用于上架应用商店】。
+      # 若将来要正式发布，应生成自有 release keystore 并改用 secrets 注入。
+      #
+      # 路径用 ${{ github.workspace }} 拼接为绝对路径：build.gradle 中
+      # storeFile 走 file(...) 解析，而 android/ 与 android/app/ 的工作目录
+      # 不同，绝对路径最稳妥。
+      - name: Build Release APK
+        run: |
+          cd android
+          ./gradlew assembleRelease \
+            -PMYAPP_UPLOAD_STORE_FILE="${{ github.workspace }}/android/app/debug.keystore" \
+            -PMYAPP_UPLOAD_KEY_ALIAS="androiddebugkey" \
+            -PMYAPP_UPLOAD_STORE_PASSWORD="android" \
+            -PMYAPP_UPLOAD_KEY_PASSWORD="android"
+
+      # 7) 校验产物确实生成（失败即中止，避免 Release 挂空附件）
+      - name: Verify APK outputs
+        run: |
+          ls -lh android/app/build/outputs/apk/release/
+          COUNT=$(ls android/app/build/outputs/apk/release/*.apk 2>/dev/null | wc -l)
+          echo "生成 APK 数量: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::未生成任何 APK，构建视为失败"
+            exit 1
+          fi
+
+      # 8) 计算 APK 的 MD5（便于校验下载完整性）
+      # 结果写入 GitHub 环境文件，供后续步骤用 env 引用（不能靠 $(cat) 跨步骤取）。
+      - name: Generate APK MD5
+        run: |
+          cd android/app/build/outputs/apk/release
+          {
+            echo 'APK_MD5<<EOF'
+            md5sum *.apk
+            echo 'EOF'
+          } >> $GITHUB_ENV
+          md5sum *.apk
+
+      # 9) 上传为 workflow artifact（run 页面可直接下载，保留 90 天）
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lx-music-mobile-v${{ steps.version.outputs.version }}-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 90
+
+      # 10) 创建/更新 GitHub Release 并附上 APK
+      #
+      # tag 命名为 v{version}-wb.{run_number}：
+      #   带上 run_number 是为了让每次编译都产生独立 Release，
+      #   避免同版本号重复触发时相互覆盖（复用常量 tag 会导致第二次报
+      #   "already exists" 而失败）。
+      # 使用 softprops/action-gh-release（与上游 release.yml 同一 action）。
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}-wb.${{ github.run_number }}
+          name: v${{ steps.version.outputs.version }} (CI build #${{ github.run_number }})
+          body: |
+            CI 编译产物（GitHub Actions 自动构建）
+
+            - 版本号：${{ steps.version.outputs.version }}
+            - 提交：${{ github.sha }}
+            - 分支：${{ github.ref_name }}
+            - 触发事件：${{ github.event_name }}
+
+            > 签名说明：本产物使用仓库内置的 `debug.keystore` 调试密钥签名，
+            > 可正常安装用于测试，**不可用于上架应用商店**。
+
+            ### APK MD5
+            ```
+            ${{ env.APK_MD5 }}
+            ```
+          files: android/app/build/outputs/apk/release/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
