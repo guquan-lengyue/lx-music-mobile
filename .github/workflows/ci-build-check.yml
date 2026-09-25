@@ -52,14 +52,23 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
-      # 3) 配置 Java 运行时（原生编译需要 JDK 17）
-      # 与项目既有约定一致：distribution microsoft / java-version 17，并开启 gradle 缓存。
+      # 3) 配置 Java 运行时（React Native 工具链需要 JDK 17）
+      # 与项目既有约定一致：distribution microsoft / java-version 17。
+      #
+      # 【为什么不开 cache: gradle】
+      # 本工作流只做 JS bundle 打包（npm run build-test），不调用 gradle，
+      # 因此不会生成 ~/.gradle 目录。实测确认：开启 cache: gradle 后，
+      # 该步骤每次运行都报
+      #   "Path Validation Error: Path(s) specified in the action for caching
+      #    do(es) not exist, hence no cache is being saved."
+      # 且仓库中从未产生任何 gradle 缓存条目（实测 gradle 缓存数为 0），
+      # 纯属无效开销与误导性告警，故此处不开启。
+      # 若将来本工作流引入原生编译（assemble*），再另行评估开启。
       - name: Setup Java Env
         uses: actions/setup-java@v4
         with:
           distribution: 'microsoft'
           java-version: '17'
-          cache: gradle
 
       # 4) 安装依赖（与项目包管理器 npm 一致，ci 模式严格按 lockfile 安装）
       - name: Install dependencies
